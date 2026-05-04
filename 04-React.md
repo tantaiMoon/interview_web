@@ -995,43 +995,23 @@ Redux 中间件的作用是在 `dispatch` 和 `reducer` 之间插入一层切面
 4. `redux-logger`：开发环境打印 action 前后状态。
 5. `RTK Query`：Redux Toolkit 内置的数据获取方案，自动管理缓存和请求状态。
 
-**中间件签名：**
+**中间件的签名与三层结构：**
 
-```js
-const middleware = ({ getState, dispatch }) => next => action => {
-  // next 是被前一个中间件包过的 dispatch
-  // 调用 next(action) 表示放行到下一个中间件
-  // 调用 dispatch(action) 表示重新从头走一遍中间件链
-  return next(action)
-}
-```
+中间件本质上是一个三层柯里化的函数，每一层对应一个生命周期阶段：
 
-这个签名是三层柯里化，对应中间件生命周期的三个阶段：
-
-1. **第一层 `({getState, dispatch})`**：在 `applyMiddleware` 阶段调用一次，注入 store API，让中间件可以读状态和重新派发 action。
-2. **第二层 `next => `**：把所有中间件的"下一层 dispatch"串成洋葱链。`next` 总是指向下一层中间件包过的 dispatch，最里层那个 `next` 就是 store 原始的 dispatch。
-3. **第三层 `action => `**：每次业务调用 `dispatch(action)` 时进入。中间件可以在这里做任何事——log、判断 action 类型、改写 action、异步触发新的 dispatch、不调 next 直接吞掉等等。
+1. **第一层（注入 store API 阶段）**：在 `applyMiddleware` 时调用一次，把 `getState` 和 `dispatch` 注入到中间件，让中间件具备读状态和重新派发 action 的能力。
+2. **第二层（串联 next 阶段）**：接收一个 `next` 参数，它指向"下一层中间件包过的 dispatch"。所有中间件的 next 串起来就形成了洋葱链，最里层的 next 才是 store 原始的 dispatch。
+3. **第三层（处理 action 阶段）**：每次业务代码调用 `dispatch(action)` 时进入，中间件可以在这里做任何事——打日志、判断 action 类型、改写 action、异步触发新的 dispatch，甚至直接吞掉不调 next。
 
 **实现本质：**
 
 1. `applyMiddleware` 接收所有中间件，给它们一个简化版 `dispatch`。
-2. 用 `compose` 把所有 `next => action => result` 串起来，形成洋葱模型。
+2. 用 `compose` 把所有"处理 action"的函数串成洋葱模型，从外到内依次执行。
 3. 把组合后的最外层函数赋给 store 的 dispatch，覆盖原始 dispatch。
 
-`redux-thunk` 实现非常简短：
+**redux-thunk 的核心思路：**
 
-```js
-const thunk = ({ dispatch, getState }) => next => action => {
-  if (typeof action === 'function') {
-    return action(dispatch, getState)
-  }
-  return next(action)
-}
-```
-
-整个 thunk 就做一件事：判断 action 是不是函数。如果是，就把 `dispatch` 和 `getState` 注入这个函数并执行——这意味着用户可以写"action creator 返回一个异步函数"，函数里随便发请求、`dispatch` 多个普通 action、读当前 state；如果不是函数，就走默认的 `next(action)` 流程，把这个普通 action 交给后续中间件和 reducer。
-
-短短几行就让 action creator 可以返回函数处理异步，这也是为什么很多人觉得"中间件就是装饰器"。
+thunk 的实现极其精简，逻辑只有一句：**判断 action 是不是函数**。如果是函数，就把 `dispatch` 和 `getState` 注入并执行它——这意味着用户可以写"action creator 返回一个异步函数"，函数里随便发请求、dispatch 多个普通 action、读当前 state；如果不是函数，就直接走 `next(action)` 流程，把这个普通 action 交给后续中间件和 reducer。短短几行代码就让异步处理成为可能，这也是为什么很多人把"中间件"理解为"装饰器"。
 
 ### Redux Toolkit 解决了什么？为什么是现在的官方推荐？
 
@@ -1045,34 +1025,15 @@ Redux 早期被诟病"样板代码太多"——一个简单功能要写 action t
 4. `createEntityAdapter`：列表/字典数据的 CRUD 工具。
 5. `RTK Query`：声明式数据获取，自动缓存、失效、重取。
 
-**createSlice 示例：**
+**createSlice 的核心思想：**
 
-```js
-const counter = createSlice({
-  name: 'counter',
-  initialState: { value: 0 },
-  reducers: {
-    // 看起来像可变更新，实际背后用 Immer 生成新对象
-    increment(state) {
-      state.value += 1
-    },
-    add(state, action) {
-      state.value += action.payload
-    },
-  },
-})
+`createSlice` 是 RTK 最具代表性的 API，它把过去 Redux"三件套"合成一份声明式配置：
 
-export const { increment, add } = counter.actions
-export default counter.reducer
-```
-
-这一段相当于过去 Redux 三件套的完整替代：
-
-1. **`name: 'counter'`** 是 slice 标识符，会自动拼接成 action type 前缀（如 `counter/increment`），不再需要手写 `const INCREMENT = 'counter/INCREMENT'`。
-2. **`reducers` 里每个方法既是 reducer，也对应自动生成的 action creator**：访问 `counter.actions.increment` 得到的就是一个 action creator，`counter.actions.increment()` 返回 `{ type: 'counter/increment' }`。
-3. **看似可变的写法**：`state.value += 1` 在原始 Redux 里是大忌，但 RTK 内部用 Immer 的 `produce` 包了一层 reducer，你直接修改 draft，Immer 在背后产出全新对象。代码可读性大幅提升，且不可变性依然保留。
-4. **带 payload 的写法**：`add(state, action) { state.value += action.payload }`，action creator 接收的参数会自动放进 `action.payload`，无需手写 action creator 函数。
-5. **导出方式**：`counter.actions` 是所有 action creators 的集合，`counter.reducer` 是合并好的 reducer 函数，可以直接交给 `configureStore({ reducer: { counter: counter.reducer } })`。
+1. **`name` 字段是 slice 标识符**：会自动拼接成 action type 前缀（如 `counter/increment`），开发者不再需要手写 `const INCREMENT = 'counter/INCREMENT'` 这类常量。
+2. **`reducers` 里每个方法既是 reducer，也对应自动生成的 action creator**：声明一个名为 `increment` 的方法，RTK 就会同时生成同名的 action creator，调用它返回 `{ type: 'counter/increment' }`。
+3. **看似可变的写法**：`state.value += 1` 在原始 Redux 里是禁忌，但 RTK 内部用 Immer 的 `produce` 包了一层 reducer，开发者直接修改 draft，Immer 在背后产出全新对象。可读性大幅提升，且不可变性依然保留。
+4. **payload 自动注入**：action creator 接收的参数会自动放进 `action.payload`，不需要手写 action creator 函数。
+5. **导出整齐**：slice 对象上的 `actions` 是所有 action creators 的集合，`reducer` 是合并好的 reducer 函数，可以直接交给 `configureStore`。
 
 **RTK 的本质优势：**
 
@@ -1141,67 +1102,17 @@ MobX 是一个基于响应式编程思想（TFRP，Transparent Functional Reacti
 | `observer(Component)` | 让组件成为 reaction，自动按需重渲 |
 | `flow` | 用 generator 写异步 action |
 
-**完整示例：**
+**典型 store 的角色划分：**
 
-```js
-import { makeAutoObservable, runInAction } from 'mobx'
-import { observer } from 'mobx-react-lite'
+一个常见的 MobX store（以 TodoStore 为例）通常包含五种角色：
 
-class TodoStore {
-  list = []
-  filter = 'all'
+1. **State**：普通的类字段（如 `list` 和 `filter`），被 `makeAutoObservable` 包装后变成可观察值，每次读写都会被 MobX 拦截。
+2. **Computed**：用 getter 声明的派生值（如 "可见 todo 列表"），结果会自动缓存——只要依赖的字段没变，多次访问不会重复计算。
+3. **Action**：同步修改 state 的方法，可以直接修改可观察对象，多次修改会被合并到同一次响应。
+4. **异步 action**：`async` 方法中 `await` 之后属于另一个 microtask，已经脱离原 action 上下文，所以必须用 `runInAction` 重新开一个 action 区块；或者用 `flow` 把 generator 函数包成异步 action。
+5. **Observer 组件**：`observer(Component)` 把组件包成一个 reaction，render 期间读到的字段都会被收集为依赖；这些字段改变时，组件就会重新执行 render。
 
-  constructor() {
-    makeAutoObservable(this, {}, { autoBind: true })
-  }
-
-  // computed —— 自动缓存，依赖未变直接用旧结果
-  get visible() {
-    if (this.filter === 'done') return this.list.filter(t => t.done)
-    if (this.filter === 'todo') return this.list.filter(t => !t.done)
-    return this.list
-  }
-
-  // action —— 同步变更
-  add(text) {
-    this.list.push({ text, done: false })
-  }
-
-  toggle(idx) {
-    this.list[idx].done = !this.list[idx].done
-  }
-
-  // 异步 action 必须用 runInAction 或 flow 包裹
-  async fetchInitial() {
-    const data = await api.getTodos()
-    runInAction(() => {
-      this.list = data
-    })
-  }
-}
-
-const store = new TodoStore()
-
-const TodoList = observer(() => (
-  <ul>
-    {store.visible.map((t, i) => (
-      <li key={i} onClick={() => store.toggle(i)}>
-        {t.done ? '✓' : '·'} {t.text}
-      </li>
-    ))}
-  </ul>
-))
-```
-
-这个示例可以拆成五个角色看：
-
-1. **State**：`list` 和 `filter` 是普通的类字段，被 `makeAutoObservable` 包装后变成可观察值，每次读写都会被 MobX 拦截。
-2. **Computed**：`get visible()` 是 getter，会被自动识别成 `computed`，结果会缓存——只要 `list` 和 `filter` 没变，多次访问 `store.visible` 不会重复计算。
-3. **Action**：`add` 和 `toggle` 是同步 action，可以直接修改可观察对象，多次修改会被合并到同一次响应。
-4. **异步 action**：`fetchInitial` 中 `await` 之后属于另一个 microtask，已经脱离原 action 上下文，所以必须用 `runInAction` 重新开一个 action 区块，否则严格模式会报错。
-5. **Observer**：`observer(() => ...)` 把组件包成一个 reaction，render 期间读到的字段都会被收集为依赖；`store.filter` 改变时，组件就会重新执行 render。
-
-这样写下来既保留了"直接改对象"的直观，又保证了响应式的精准更新。
+这种组织方式既保留了"直接改对象"的直观写法，又保证了响应式的精准更新。
 
 ### MobX 的依赖收集是怎么工作的？
 
@@ -1226,49 +1137,17 @@ MobX 的精髓在于"**自动**依赖收集"，无需手写 selector。底层模
 2. **依赖动态变化**：`if (a) return b; else return c;` 这种条件读取，依赖会随 a 变化而切换。
 3. **零样板**：不用写 mapStateToProps 或 selector，怎么用就怎么收集。
 
-**伪代码理解：**
+**核心机制概括：**
 
-下面这段伪代码刻画了上述三类对象之间的协作。`Atom` 负责"读时登记、写时通知"；`Derivation` 负责"运行前清空旧依赖、运行中收集新依赖"；全局变量 `currentDerivation` 是把读写挂钩起来的关键——它告诉 `Atom`："当前正在执行的 derivation 是谁，要把我加到它的依赖里"。
+整个依赖收集其实就是 Atom 和 Derivation 之间的双向引用，再加上一个全局指针：
 
-```js
-let currentDerivation = null
+1. **读时登记**：每次属性被读取时，Atom 检查全局指针上的"当前正在执行的 derivation"，把这个 derivation 加入自己的观察者集合，同时让 derivation 也记录"我依赖了这个 Atom"——双向引用是为了卸载时能彻底清理。
+2. **写时通知**：属性被修改时，Atom 遍历自己的观察者集合，把所有依赖它的 derivation 安排重新执行。
+3. **执行前清空旧依赖**：每个 derivation 在重新执行前会先清空旧依赖集合，是为了支持"依赖动态变化"——比如 if/else 切换分支后，依赖集合会自然更新。
+4. **嵌套支持**：用栈式保存/恢复"全局指针"的旧值，可以支持嵌套的 derivation（一个 derivation 在执行过程中触发另一个 derivation 的初始化）。
+5. **批处理调度**：触发更新时常用 `queueMicrotask` 等机制延迟执行，把同一事件循环里的多次变更合并为一次重跑。
 
-class Atom {
-  observers = new Set()
-  reportObserved() {
-    if (currentDerivation) {
-      this.observers.add(currentDerivation)
-      currentDerivation.deps.add(this)
-    }
-  }
-  reportChanged() {
-    this.observers.forEach(d => d.schedule())
-  }
-}
-
-class Derivation {
-  deps = new Set()
-  run(fn) {
-    this.deps.clear()
-    const prev = currentDerivation
-    currentDerivation = this
-    try { fn() } finally { currentDerivation = prev }
-  }
-  schedule() {
-    queueMicrotask(() => this.run(this.fn))
-  }
-}
-```
-
-逐行解读：
-
-1. `reportObserved` 在每次属性被读取时调用，建立"双向引用"——Atom 知道有谁在监听自己，Derivation 也知道自己依赖了哪些 Atom。双向是为了卸载时能清理干净。
-2. `reportChanged` 在属性被修改时调用，遍历所有观察者并安排重新执行。
-3. `Derivation.run` 每次执行前先清空旧依赖（`deps.clear()`），是为了支持"依赖动态变化"——比如 if/else 切换分支后，依赖集合会自然更新。
-4. 用 `try/finally` 恢复 `prev`，是为了支持嵌套的 derivation（一个 derivation 在执行过程中可能触发另一个 derivation 的初始化）。
-5. `schedule` 用 `queueMicrotask` 是为了在同一个事件循环中合并多次变更，只触发一次 re-run。
-
-这就是为什么"在 observer 组件里读 store.x"等价于"自动 useSelector(s => s.x)"。
+这就是为什么"在 observer 组件里读 store.x"等价于"自动 useSelector(s => s.x)"——MobX 在背后做了所有依赖追踪的脏活。
 
 ### MobX 中 action、runInAction、flow 有什么区别？
 
@@ -1278,27 +1157,9 @@ class Derivation {
 2. **`runInAction`**：在异步代码中临时开一个 action 区块，常用于 `await` 之后包裹 state 修改。
 3. **`flow`**：用 generator 写异步 action，每个 `yield` 处自动 runInAction，避免到处写 try/catch + runInAction。
 
-```js
-// flow 示例
-import { flow } from 'mobx'
+**为什么 flow 要用 generator 而不是 `async/await`？** 因为 MobX 需要在每个异步暂停点（即 `yield`）之后重新进入 action 上下文。用 `async/await` 时 await 之后的代码已经脱离原函数调用栈，MobX 没办法自动识别"这里仍在 action 中"；而 generator 是 MobX 自己驱动 `next()` 调用的，它知道每个 `yield` 之后的恢复点，可以自动包一层 `runInAction`。代码读起来像同步，写起来不用手动 wrapper，两全其美。
 
-class Store {
-  list = []
-  loading = false
-  fetchList = flow(function* () {
-    this.loading = true
-    try {
-      this.list = yield api.fetch()
-    } finally {
-      this.loading = false
-    }
-  })
-}
-```
-
-为什么要用 generator 而不是 `async/await`？因为 MobX 需要在每个异步暂停点（即 `yield`）之后重新进入 action 上下文。用 `async/await` 时 await 之后的代码已经脱离原函数调用栈，MobX 没办法自动识别"这里仍在 action 中"；而 generator 是 MobX 自己驱动 `next()` 调用的，它知道每个 `yield` 之后的恢复点，可以自动包一层 `runInAction`。代码读起来像同步，写起来不用手动 wrapper，两全其美。
-
-严格模式（`enforceActions: 'observed'` / `'always'`）下，不写 action 直接改 state 会报错，这是大型项目推荐的配置。
+**严格模式建议：** `enforceActions: 'observed'` / `'always'` 下，不写 action 直接改 state 会报错，这是大型项目推荐的配置——它强制所有变更都通过显式 action 完成，便于事务批处理和调试追踪。
 
 ### MobX 4、5、6 有什么区别？
 
@@ -1364,105 +1225,40 @@ Zustand（德语"状态"）是一个极简的 React 状态管理库，作者是 
 4. 可在 React 之外使用（vanilla store）。
 5. 完整支持 React 18 并发模式（基于 `useSyncExternalStore`）。
 
-**完整示例：**
+**Zustand 的核心使用心法：**
 
-```js
-import { create } from 'zustand'
-import { devtools, persist } from 'zustand/middleware'
-
-const useBearStore = create(
-  devtools(
-    persist(
-      (set, get) => ({
-        bears: 0,
-        increase: () => set(state => ({ bears: state.bears + 1 })),
-        reset: () => set({ bears: 0 }),
-        // 可以在 action 内部读其他状态
-        double: () => set({ bears: get().bears * 2 }),
-      }),
-      { name: 'bear-storage' },
-    ),
-  ),
-)
-
-// 使用：传 selector 实现按需订阅
-function Counter() {
-  const bears = useBearStore(state => state.bears)
-  const increase = useBearStore(state => state.increase)
-  return <button onClick={increase}>{bears}</button>
-}
-```
-
-这个例子可以对照 Redux 的写法看出 Zustand 的极简：
+对照 Redux 的写法，Zustand 极简体现在五个细节：
 
 1. **`create` 接收一个工厂函数**：参数是 `(set, get) => state`，返回值就是 store 的初始状态 + 操作方法。state 和 action 写在一起，没有 reducer / dispatch / action types 的拆分。
-2. **`set` 默认是浅合并**：`set({ bears: 0 })` 等价于 `Object.assign(prevState, { bears: 0 })`，不需要展开旧状态。
-3. **`get()` 用来在 action 内部读其他字段**：避免依赖外部闭包变量，保证读到的总是最新值。
-4. **中间件像洋葱套娃**：从外到内是 `devtools → persist → 实际配置`，请求会逐层穿过包装，最终到达 store。`persist` 负责把 state 写入 localStorage（key 由 `name` 指定），`devtools` 负责把每次 set 上报到 Redux DevTools。
-5. **消费时务必传 selector**：`useBearStore(s => s.bears)` 表示"我只关心 bears 字段"，只有它变化才会让组件重渲；如果直接 `useBearStore()` 不传 selector，整个 state 任何字段变都会触发重渲，严重退化性能。
+2. **`set` 默认是浅合并**：传一个对象进去等价于 `Object.assign(prevState, partial)`，不需要展开旧状态；也支持函数式写法 `set(prev => next)`。
+3. **`get()` 用于在 action 内部读其他字段**：避免依赖外部闭包变量，保证读到的总是最新值，特别是异步 action 里。
+4. **中间件像洋葱套娃**：例如 `devtools(persist(config))`，请求会逐层穿过包装。`persist` 把 state 写入 localStorage，`devtools` 把每次 set 上报到 Redux DevTools。
+5. **消费时务必传 selector**：`useStore(s => s.bears)` 表示"我只关心 bears 字段"，只有它变化才会让组件重渲；如果直接 `useStore()` 不传 selector，整个 state 任何字段变都会触发重渲，严重退化性能。
 
 ### Zustand 的实现原理是什么？
 
 Zustand 内部其实非常薄，核心思路三句话：**一个 vanilla store + useSyncExternalStore + selector 浅比较**。
 
-**Vanilla store 实现：**
+ 1. Vanilla store 提供"状态 + 订阅"的纯 JS 能力。
+  2. useSyncExternalStore 把这个外部 store 安全接入 React 的并发渲染体系。
+  3. Selector 浅比较 让每个组件只订阅自己关心的切片，避免无关重渲。
 
-下面这段是 Zustand 内部 `createStore` 的简化版本——不依赖 React，可以独立运行在 Node、Worker 或测试环境里。它只做三件事：保存 state、提供 setState、维护订阅者列表。
+**Vanilla store 的本质：**
 
-```js
-function createStore(createState) {
-  let state
-  const listeners = new Set()
+最底层是一个不依赖任何框架的纯 JS store，可以独立运行在 Node、Worker 或测试环境里。它只做三件事：保存 state、提供 setState、维护订阅者列表。关键设计点：
 
-  const setState = (partial, replace) => {
-    const nextState = typeof partial === 'function' ? partial(state) : partial
-    if (!Object.is(nextState, state)) {
-      const prev = state
-      state = replace ? nextState : Object.assign({}, state, nextState)
-      listeners.forEach(l => l(state, prev))
-    }
-  }
+1. **`setState` 支持两种形式**——直接传对象，或者传 `(prev) => next` 函数，跟 React 的 `setState` 完全一致。
+2. **用 `Object.is` 做引用比较**，避免相同状态多次通知；这也是为什么 Zustand 推荐"返回新对象"的不可变更新。
+3. **默认浅合并**：传对象进去会和旧 state 走 `Object.assign` 合并；`replace: true` 时直接替换整个 state。
+4. **订阅者用 `Set`** 而不是数组，是为了取消订阅时 `O(1)` 删除，并且天然去重。
+5. **首次执行工厂函数**：把用户写的 `(set, get) => state` 跑一次，把返回值作为初始状态，同时把 setState/getState 注入给 action 闭包。
 
-  const getState = () => state
-  const subscribe = (listener) => {
-    listeners.add(listener)
-    return () => listeners.delete(listener)
-  }
-  const destroy = () => listeners.clear()
-
-  const api = { setState, getState, subscribe, destroy }
-  state = createState(setState, getState, api)
-  return api
-}
-```
-
-代码要点逐条对应：
-
-1. `setState` 支持两种形式——直接传对象，或者传 `(prev) => next` 函数，跟 React 的 `setState` 完全一致。
-2. 用 `Object.is` 做引用比较，避免相同状态多次通知；这也是为什么 Zustand 推荐"返回新对象"的不可变更新。
-3. `replace` 参数控制是覆盖还是浅合并：默认 `false` 走 `Object.assign(...)` 浅合并，`true` 则直接用新状态替换整个 state。
-4. `listeners` 用 `Set` 而不是数组，是为了 `subscribe` 返回的取消订阅函数 `O(1)` 删除，并且天然去重。
-5. 最后一行 `state = createState(setState, getState, api)` 把用户工厂函数运行一次，把返回值作为初始状态，同时把 setState/getState 注入给 action 闭包。
-
-**接入 React：**
-
-```js
-function create(createState) {
-  const api = createStore(createState)
-  const useStore = (selector = s => s, equalityFn = Object.is) =>
-    useSyncExternalStore(
-      api.subscribe,
-      () => selector(api.getState()),
-      () => selector(api.getState()),  // SSR snapshot
-    )
-  return Object.assign(useStore, api)
-}
-```
+**接入 React 的方式：**
 
 接入层做了两件事：
 
-1. **把 store 包成一个 hook**：每次组件 render 时调用 `useSyncExternalStore`，第一个参数是订阅函数，第二个参数是当前快照的 getter，第三个参数是 SSR 时的快照。React 会自己处理订阅、取消订阅、缓存快照、并发模式下避免 tearing 等所有边界。
-2. **`Object.assign(useStore, api)`**：让返回的 hook 同时拥有 `setState`/`getState`/`subscribe` 等方法，所以可以在 React 之外这样用：`useBearStore.getState()`、`useBearStore.subscribe(...)`，不必再绕一圈。
+1. **把 store 包成一个 hook**：每次组件 render 时调用 `useSyncExternalStore`，参数是订阅函数和当前快照的 getter。React 会自己处理订阅、取消订阅、缓存快照、并发模式下避免 tearing 等所有边界。
+2. **把 hook 和 store API 合并成一个对象**：让返回的 hook 同时拥有 `setState`/`getState`/`subscribe` 等方法，所以可以在 React 之外这样用：`useStore.getState()`、`useStore.subscribe(...)`，不必再绕一圈。
 
 `useSyncExternalStore` 是 React 18 提供的官方"接外部 store"接口，保证：
 
@@ -1470,16 +1266,14 @@ function create(createState) {
 2. 自动处理订阅/取消订阅时机。
 3. SSR 下能拿到一致的快照。
 
-**选择器机制：**
+**选择器机制的关键：**
 
-```js
-const bears = useBearStore(s => s.bears)             // 默认 Object.is 比较
-const both = useBearStore(s => ({ a: s.a, b: s.b }), shallow)  // 返回对象时配 shallow
-```
+消费 store 时务必传 selector，并理解默认比较的边界：
 
-为什么第二行要传 `shallow`？因为 selector 返回的是一个**新对象** `{ a, b }`，每次 render 引用都不同，默认 `Object.is` 永远判定为"变了"，组件就会无限重渲。`shallow` 比较的是对象内的一层字段是否相等，避免这种假阳性。等价的另一种写法是用两个 selector 各取一个字段，那样就不需要 `shallow`。
-
-如果不传 selector，组件订阅整个 state，任何变化都会触发重渲染——这正是不推荐的用法。
+1. **默认按 `Object.is` 比较**，selector 返回基本类型最稳妥。
+2. **selector 返回对象时必须配 `shallow`**：因为每次 render 的对象都是新引用，默认比较永远判定为"变了"，组件就会无限重渲。`shallow` 比较的是对象内一层字段是否相等，避免这种假阳性。
+3. **更优雅的写法是用多个 selector 各取一个字段**，那样就不需要 `shallow`。
+4. **不传 selector 等于订阅整个 state**——任何变化都会触发重渲染，这正是不推荐的用法。
 
 ### Zustand 中间件机制是怎么工作的？
 
@@ -1491,34 +1285,13 @@ type Middleware = (config: StateCreator) => StateCreator
 
 读这条签名：中间件接收一个 `StateCreator`（即用户写的 `(set, get) => state`），返回另一个 `StateCreator`。它通常会在内部调用原 config，但把 `set` 替换成自己包装过的版本，这样所有用户调用 `set(...)` 时都会先经过中间件这一层。
 
-**`devtools` 中间件简化版：**
+**`devtools` 中间件的核心思路：**
 
-```js
-const devtools = (config) => (set, get, api) =>
-  config(
-    (...args) => {
-      set(...args)
-      window.__REDUX_DEVTOOLS_EXTENSION__?.send('action', get())
-    },
-    get,
-    api,
-  )
-```
+返回一个新的 StateCreator，在执行用户配置时把原始 `set` 替换成"先调原 set 更新状态，再把最新 state 上报给 Redux DevTools"的增强版；`get` 和 `api` 透传不变。这样每次状态变更都能被时间旅行调试器抓到，而用户代码完全无感知。
 
-逐行看：返回的新 StateCreator 在执行用户配置时，把原始 `set` 替换成"先调原 set 更新状态，再把最新 state 上报给 Redux DevTools"的版本。`get` 和 `api` 透传不变。这样就实现了"每次状态变更都能被时间旅行调试器抓到"，而用户代码完全无感知。
+**`immer` 中间件的核心思路：**
 
-**`immer` 中间件让你写"可变"代码：**
-
-```js
-const immer = (config) => (set, get, api) =>
-  config(
-    (partial) => set(produce(partial)),
-    get,
-    api,
-  )
-```
-
-`produce` 是 Immer 提供的工具：它接收一个"看似可变"的 recipe，内部用 Proxy 跟踪你对草稿的修改，最后产出新的不可变对象。这里把 `set` 包成 `set(produce(partial))`，意味着用户可以写 `set(state => { state.list.push(item) })` 这种直观写法，但底层 state 仍然是不可变更新，引用比较依然有效。
+把 `set` 包装一层，让传入的"看似可变" recipe 先通过 Immer 的 `produce` 处理：Immer 内部用 Proxy 跟踪开发者对草稿的修改，最终产出新的不可变对象。包装后用户可以写 `set(state => { state.list.push(item) })` 这种直观写法，但底层 state 仍然是不可变更新，引用比较依然有效。
 
 中间件可以层层嵌套（洋葱模型），比如 `devtools(persist(immer(config)))` 表示：用户调用 `set` → immer 把"可变"变"不可变" → persist 把新状态写入 storage → devtools 上报到面板。每一层都只关心自己那一段逻辑，互相解耦。
 
@@ -1534,37 +1307,276 @@ const immer = (config) => (set, get, api) =>
 
 随着 store 变大，把所有 state 写在一个 create 里会变成"巨型函数"。slices 模式是社区主流方案：每个业务模块写成一个工厂函数，工厂函数接收 `(set, get, api)`，返回该模块的状态和方法；最后在统一的 `create` 调用里把所有工厂函数执行一遍，把结果展开合并。
 
-```js
-const createBearSlice = (set) => ({
-  bears: 0,
-  addBear: () => set(s => ({ bears: s.bears + 1 })),
-})
+**核心设计要点：**
 
-const createFishSlice = (set) => ({
-  fishes: 0,
-  addFish: () => set(s => ({ fishes: s.fishes + 1 })),
-})
+1. **`(set, get, api)` 透传**：根 store 的工厂函数把这三个参数原封不动传给每个 slice，让它们共享同一个 store 实例。
+2. **共享同一个 set**：所有 slice 内部的 `set` 是同一个函数，因此一个 slice 也可以读写另一个 slice 的字段，跨模块协作天然支持。
+3. **对象展开合并**：把每个 slice 的返回值通过 `...` 展开到同一个对象里，等价于把所有 slice 的字段拍平到同一个 state 上。如果两个 slice 出现同名字段，后展开的会覆盖前面——所以命名时建议加业务前缀。
+4. **TypeScript 友好**：可以给每个 slice 定义 `StateCreator<RootState, [], [], XxxSlice>` 类型，让 `set` / `get` 自动推导出整个 RootState 的形状。
 
-const useStore = create((...a) => ({
-  ...createBearSlice(...a),
-  ...createFishSlice(...a),
-}))
-```
-
-这里有几个设计细节值得注意：
-
-1. `(...a)` 是 `(set, get, api)` 的简写，原封不动透传给每个 slice，让它们共享同一个 store 实例。
-2. `set` 在所有 slice 内部都是同一个函数，因此 bear slice 也可以读写 fish slice 的字段，跨模块协作天然支持。
-3. 用对象展开 `...createBearSlice(...a)` 合并状态，等价于把所有 slice 的字段拍平到同一个 state 上。如果两个 slice 出现同名字段，后展开的会覆盖前面——所以命名时建议加业务前缀。
-4. TypeScript 项目里可以给每个 slice 定义 `StateCreator<RootState, [], [], BearSlice>` 类型，让 `set`/`get` 自动推导出整个 RootState 的形状。
-
-每个 slice 是一个独立的工厂函数，最终合并成一个 store。优点：
+**优点：**
 
 1. 文件按业务拆分，便于维护。
 2. 不同 slice 可以互相调用 `get()` 协作。
 3. 类型推导可以用 `StateCreator` 精确化。
 
-要避免的反模式：每个 slice 单独 `create` 一个 store，会失去跨 slice 协作能力，也增加心智负担。
+**要避免的反模式**：每个 slice 单独 `create` 一个 store，会失去跨 slice 协作能力，也增加心智负担。
+
+#### 实践一：推荐的目录结构
+
+```
+src/
+├── store/
+│   ├── index.ts              # 根 store，组合所有 slice
+│   ├── types.ts              # RootState 类型定义
+│   ├── middleware.ts         # 自定义中间件
+│   └── slices/
+│       ├── auth.slice.ts     # 用户认证
+│       ├── cart.slice.ts     # 购物车
+│       ├── ui.slice.ts       # UI 状态（侧边栏、Modal）
+│       └── settings.slice.ts # 用户偏好
+├── features/
+│   ├── auth/
+│   │   ├── LoginForm.tsx
+│   │   └── hooks.ts          # 该 feature 独有的 selector hook
+│   └── cart/
+│       ├── CartList.tsx
+│       └── hooks.ts
+```
+
+按业务拆 slice、按 feature 组织 UI——store 的物理边界和业务边界对齐，新人上手能立刻理解"购物车逻辑在 cart.slice.ts、购物车 UI 在 features/cart/"。
+
+#### 实践二：单个 slice 的写法
+
+每个 slice 是一个工厂函数，配上独立的类型定义和 action 命名前缀：
+
+```ts
+// store/slices/auth.slice.ts
+import { StateCreator } from 'zustand'
+import type { RootState } from '../types'
+
+export interface AuthSlice {
+  user: User | null
+  token: string | null
+  isAuthenticated: boolean
+  authLogin: (email: string, password: string) => Promise<void>
+  authLogout: () => void
+  authRefreshToken: () => Promise<void>
+}
+
+export const createAuthSlice: StateCreator<
+  RootState,
+  [['zustand/immer', never]],   // 中间件元组（用 immer 时声明）
+  [],
+  AuthSlice
+> = (set, get) => ({
+  user: null,
+  token: null,
+  isAuthenticated: false,
+
+  authLogin: async (email, password) => {
+    const { user, token } = await api.login(email, password)
+    set((state) => {
+      state.user = user
+      state.token = token
+      state.isAuthenticated = true
+    })
+  },
+
+  authLogout: () => {
+    set((state) => {
+      state.user = null
+      state.token = null
+      state.isAuthenticated = false
+    })
+    // 清理购物车（跨 slice 调用）
+    get().cartClear()
+  },
+
+  authRefreshToken: async () => {
+    const token = get().token
+    if (!token) return
+    const fresh = await api.refresh(token)
+    set((state) => { state.token = fresh })
+  },
+})
+```
+
+要点：
+
+1. **action 加业务前缀**（`authLogin` 而不是 `login`）：避免合并 slice 时同名冲突。
+2. **`set` 用 immer 风格**：配合 immer 中间件后可以直接 `state.user = user`，不用展开。
+3. **跨 slice 协作通过 `get()`**：`authLogout` 调用 `get().cartClear()`，自然完成"登出后清空购物车"的联动。
+
+#### 实践三：根 store 组合多个 slice
+
+```ts
+// store/index.ts
+import { create } from 'zustand'
+import { devtools, persist, immer } from 'zustand/middleware'
+
+import { createAuthSlice, AuthSlice } from './slices/auth.slice'
+import { createCartSlice, CartSlice } from './slices/cart.slice'
+import { createUiSlice, UiSlice } from './slices/ui.slice'
+import { createSettingsSlice, SettingsSlice } from './slices/settings.slice'
+
+export type RootState = AuthSlice & CartSlice & UiSlice & SettingsSlice
+
+export const useStore = create<RootState>()(
+  devtools(
+    persist(
+      immer((...a) => ({
+        ...createAuthSlice(...a),
+        ...createCartSlice(...a),
+        ...createUiSlice(...a),
+        ...createSettingsSlice(...a),
+      })),
+      {
+        name: 'app-storage',
+        // 只持久化部分 slice：UI 状态不持久化
+        partialize: (state) => ({
+          token: state.token,
+          settings: state.settings,
+          cart: state.cart,
+        }),
+      },
+    ),
+    { name: 'AppStore' },
+  ),
+)
+```
+
+要点：
+
+1. **`RootState` 是所有 slice 类型的交集**：TypeScript 会自动校验是否有字段冲突，命名规范化的好处在编译期就能享受到。
+2. **中间件按需嵌套**：`devtools` 包最外层方便调试，`persist` 处理持久化，`immer` 让 slice 内部能写"看似可变"的代码。
+3. **`partialize` 选择性持久化**：UI 状态（侧边栏开合、Modal 展示）不需要刷新后保留，只持久化业务关键状态——避免 localStorage 越塞越大。
+
+#### 实践四：组件中的高效消费
+
+slice 模式下，**selector 写法决定性能上限**：
+
+```tsx
+// ❌ 反模式：订阅整个 state，任何字段变都重渲
+function CartBadge() {
+  const state = useStore()
+  return <span>{state.cart.items.length}</span>
+}
+
+// ❌ 反模式：返回新对象但没配 shallow，无限重渲
+function UserMenu() {
+  const { user, authLogout } = useStore((s) => ({
+    user: s.user,
+    authLogout: s.authLogout,
+  }))
+  return <button onClick={authLogout}>{user?.name}</button>
+}
+
+// ✅ 正确：每个字段单独订阅
+function UserMenu() {
+  const user = useStore((s) => s.user)
+  const authLogout = useStore((s) => s.authLogout)
+  return <button onClick={authLogout}>{user?.name}</button>
+}
+
+// ✅ 或者用 useShallow 处理对象返回
+import { useShallow } from 'zustand/react/shallow'
+
+function UserMenu() {
+  const { user, authLogout } = useStore(
+    useShallow((s) => ({ user: s.user, authLogout: s.authLogout })),
+  )
+  return <button onClick={authLogout}>{user?.name}</button>
+}
+```
+
+#### 实践五：把 selector 抽成自定义 hook
+
+每个 feature 写一组语义化 hook，组件层不直接依赖 store 形状，重构时改动最小：
+
+```ts
+// features/cart/hooks.ts
+export const useCartItems = () => useStore((s) => s.cart.items)
+export const useCartTotal = () =>
+  useStore((s) =>
+    s.cart.items.reduce((sum, x) => sum + x.price * x.quantity, 0),
+  )
+export const useCartActions = () =>
+  useStore(
+    useShallow((s) => ({
+      cartAdd: s.cartAdd,
+      cartRemove: s.cartRemove,
+      cartClear: s.cartClear,
+    })),
+  )
+
+// 组件里使用
+function CartList() {
+  const items = useCartItems()
+  const { cartRemove } = useCartActions()
+  // ...
+}
+```
+
+#### 实践六：在非 React 代码中使用
+
+slice 模式天然支持脱离 React 调用：API 拦截器、路由守卫、Service Worker、Web Worker 都能直接操作 store：
+
+```ts
+// api/interceptor.ts
+import { useStore } from '@/store'
+
+axios.interceptors.request.use((config) => {
+  const token = useStore.getState().token
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+axios.interceptors.response.use(
+  (res) => res,
+  async (err) => {
+    if (err.response?.status === 401) {
+      // 直接调 action，不需要 React 上下文
+      await useStore.getState().authRefreshToken()
+      return axios(err.config)
+    }
+    throw err
+  },
+)
+```
+
+这是 Zustand 相比 Redux 的一大优势：store 是模块级单例，任何地方 `import` 都能拿到最新状态，不需要 dispatch/subscribe 那一套样板。
+
+#### 实践七：测试时重置 store
+
+slice 模式下测试很容易，把初始状态抽出来即可：
+
+```ts
+// store/index.ts
+const initialState = {
+  user: null,
+  cart: { items: [] },
+  // ...
+}
+
+export const useStore = create<RootState>()(/* ... */)
+
+// 测试工具
+export const resetStore = () => useStore.setState(initialState, true)
+
+// 单测
+beforeEach(() => resetStore())
+```
+
+`setState(state, true)` 的第二个参数是 replace 标记，用整个新 state 替换当前 state，比浅合并更彻底——这是单测中"每个 case 拿到干净 store"的标准做法。
+
+#### 反模式速查
+
+1. **每个业务一个独立 store**：跨业务联动只能靠 effect 监听 + 手动同步，回到 Context 时代的"状态散落各处"。
+2. **slice 内调用 `useStore`**：slice 工厂函数不能用 hook，只能用 `set`/`get`。
+3. **action 命名不加前缀**：合并多个 slice 时极易撞名，且 DevTools 里看到 `add` / `remove` 这类通用名字根本不知道来自哪个模块。
+4. **把派生值放进 state**：派生值（如购物车总价）应该用 selector 实时计算，写进 state 容易和源数据脱节。
+5. **selector 里返回新对象不配 shallow**：每次 render 都判不等，组件无限重渲。
 
 ### Zustand 还有什么高级用法？
 
@@ -1733,189 +1745,73 @@ Redux 的"store 内核纯净 + 中间件扩展"是历史包袱也是优点：清
 
 ### 简单实现一个 mini-Redux？
 
-Redux 的核心实现并不复杂，本质就是发布订阅 + 状态快照。下面这版包含了 `createStore`、`combineReducers`、`compose`、`applyMiddleware` 四个核心 API，一一对应官方源码的关键设计。
+Redux 的核心实现并不复杂，本质就是发布订阅 + 状态快照。整体只需要四个核心 API：`createStore`、`combineReducers`、`compose`、`applyMiddleware`，对应官方源码的关键设计。
 
-```js
-function createStore(reducer, initialState, enhancer) {
-  if (typeof enhancer === 'function') {
-    return enhancer(createStore)(reducer, initialState)
-  }
+**`createStore` —— 发布订阅 + 状态快照**
 
-  let state = initialState
-  const listeners = []
+最核心的部分。内部维护一份 `state` 变量和一个 `listeners` 数组，对外暴露三个能力：
 
-  function getState() {
-    return state
-  }
+1. **`getState`**：直接返回当前 state。
+2. **`dispatch(action)`**：把当前 state 和 action 交给 reducer 算出新 state，然后遍历所有 listener 通知更新。遍历时通常会先复制一份 listener 列表（如 `listeners.slice()`），避免遍历过程中其他订阅者取消订阅导致索引错乱——这是典型的"边遍历边修改"问题。
+3. **`subscribe(listener)`**：把 listener 加入数组，返回一个取消订阅函数。
 
-  function dispatch(action) {
-    state = reducer(state, action)
-    listeners.slice().forEach(fn => fn())
-    return action
-  }
+构造完成后会自动 `dispatch({ type: '@@INIT' })`——这是 Redux 的小技巧，让每个 reducer 都返回各自的初始值，从而组装出完整的 state 树。
 
-  function subscribe(listener) {
-    listeners.push(listener)
-    return () => {
-      const idx = listeners.indexOf(listener)
-      if (idx >= 0) listeners.splice(idx, 1)
-    }
-  }
+**`combineReducers` —— 引用稳定优化**
 
-  dispatch({ type: '@@INIT' })
+把多个分领域的 reducer 合成一个 root reducer。关键点是用 `changed` 标志判断"这次 dispatch 是否真的改变了任意子 state"：如果所有子 reducer 都返回了和原来一样的引用，就直接返回旧 state，避免顶层引用变化误触发 `useSelector`。这是 Redux 性能优化的根基。
 
-  return { getState, dispatch, subscribe }
-}
+**`compose` —— 串联中间件的工具**
 
-// reducer 组合
-function combineReducers(reducers) {
-  return (state = {}, action) => {
-    const next = {}
-    let changed = false
-    for (const key in reducers) {
-      const prev = state[key]
-      const cur = reducers[key](prev, action)
-      next[key] = cur
-      if (cur !== prev) changed = true
-    }
-    return changed ? next : state
-  }
-}
+函数式编程里的常见工具，`compose(f, g, h)(x) === f(g(h(x)))`。Redux 用它把多个中间件按右往左串联，形成洋葱模型。
 
-// compose 工具
-const compose = (...fns) =>
-  fns.length === 0 ? x => x : fns.reduce((a, b) => (...args) => a(b(...args)))
+**`applyMiddleware` —— store enhancer**
 
-// applyMiddleware
-function applyMiddleware(...middlewares) {
-  return (createStore) => (reducer, initialState) => {
-    const store = createStore(reducer, initialState)
-    let dispatch = () => { throw new Error('dispatch in setup phase') }
-    const api = {
-      getState: store.getState,
-      dispatch: (...args) => dispatch(...args),
-    }
-    const chain = middlewares.map(m => m(api))
-    dispatch = compose(...chain)(store.dispatch)
-    return { ...store, dispatch }
-  }
-}
-```
+中间件机制的入口。两个关键设计：
 
-按四个 API 的职责拆开看：
-
-1. **`createStore`**：这是最核心的"发布订阅 + 状态快照"。`dispatch` 调用 reducer 算出新 state，再把所有 listener 拉一遍。`listeners.slice()` 是为了避免遍历过程中其他订阅者取消订阅导致索引错乱（典型的"边遍历边修改"问题）。最后那行 `dispatch({ type: '@@INIT' })` 是 Redux 的小技巧——首次 dispatch 一个内部 action，让每个 reducer 都返回各自的初始值，从而组装出完整的 state 树。
-2. **`combineReducers`**：把多个分领域的 reducer 合成一个 root reducer。关键点是 `changed` 标志：如果所有子 reducer 都返回了和原来一样的引用，就直接返回旧 state，避免顶层引用变化误触发 `useSelector`。这是 Redux 性能优化的根基。
-3. **`compose`**：函数式编程里的常见工具，`compose(f, g, h)(x) === f(g(h(x)))`。Redux 用它把多个中间件按右往左串联，形成洋葱模型。
-4. **`applyMiddleware`**：是一个 store enhancer。注意第一行 `let dispatch = () => { throw ... }`——这是为了防止中间件在初始化阶段提前调用 dispatch；只有所有中间件都注册完，最终的 dispatch 才被赋上真正的实现。`api` 对象里 dispatch 写成 `(...args) => dispatch(...args)` 而不是 `dispatch`，是为了延迟取值，让中间件拿到的永远是最新版本而非初始抛错版本。
+1. **延迟绑定 dispatch**：在中间件初始化阶段，先把 `dispatch` 设成"调用时抛错"的占位函数，防止中间件在初始化阶段提前调用 dispatch；只有所有中间件都注册完，最终的 dispatch 才被赋上真正的实现。
+2. **闭包引用而非直接传递**：传给中间件的 `api.dispatch` 不能是当前 dispatch 的引用，而是 `(...args) => dispatch(...args)` 这种延迟取值的形式，让中间件拿到的永远是最新版本。
 
 整套核心代码不到 50 行，但足以支撑 React-Redux 这样庞大的生态。
 
 ### 简单实现一个 mini-MobX？
 
-抓住"依赖收集 + 通知更新"两件事，不到 30 行就能跑：
+抓住"依赖收集 + 通知更新"两件事，整套实现非常精简。
 
-```js
-let activeReaction = null
+**核心设计：用 Proxy + 一个全局变量**
 
-function observable(target) {
-  const atoms = new Map()  // key -> Set<reaction>
+1. **`activeReaction` 全局变量当"暗号"**：每个 reaction（autorun 包装出来的函数）执行前把自己赋值给这个全局变量，相当于举手喊"现在轮到我了，谁被读取请记下我"。
+2. **Proxy 的 `get` 拦截器**：检查 `activeReaction` 是否有值——有就把它加到这个 key 对应的观察者集合里。这样每个 key 都有自己独立的"观察者集合"。
+3. **Proxy 的 `set` 拦截器**：在赋值后遍历该 key 的观察者集合，挨个调用——也就是触发所有依赖该字段的 reaction 重新执行。
+4. **重新执行时自动重新收集依赖**：reaction 重跑时再次进入 `activeReaction` 状态、重新走一遍函数体，所以新的依赖会被自然收集，旧的依赖无人维护就会被遗忘——这就是为什么 if/else 切换分支后依赖能动态更新。
 
-  return new Proxy(target, {
-    get(t, key) {
-      if (!atoms.has(key)) atoms.set(key, new Set())
-      if (activeReaction) {
-        atoms.get(key).add(activeReaction)
-      }
-      return t[key]
-    },
-    set(t, key, value) {
-      if (t[key] === value) return true
-      t[key] = value
-      atoms.get(key)?.forEach(r => r())
-      return true
-    },
-  })
-}
+**关键特性：粒度极细**
 
-function autorun(fn) {
-  const reaction = () => {
-    activeReaction = reaction
-    try { fn() } finally { activeReaction = null }
-  }
-  reaction()
-}
-
-// 使用
-const state = observable({ count: 0, name: 'mobx' })
-autorun(() => console.log('count:', state.count))   // 输出 count: 0
-state.count = 1                                       // 输出 count: 1
-state.name = 'x'                                      // 不输出（autorun 没读 name）
-```
-
-理解的关键是把 `activeReaction` 当成"暗号"：
-
-1. `autorun(fn)` 包装出一个 `reaction` 函数，它每次执行前会把自己赋值给全局 `activeReaction`，相当于举手喊"现在轮到我了，谁被读取请记下我"。
-2. Proxy 的 `get` 拦截器检查 `activeReaction` 是否有值——有就把它加到这个 key 对应的 Set 里。这样每个 key 都有自己的"观察者集合"。
-3. `set` 拦截器在赋值后遍历该 key 的观察者集合，挨个调用——也就是触发依赖该字段的 autorun 重新执行。
-4. 因为重新执行时 `reaction` 会再次进入 `activeReaction` 状态、重新走一遍 `fn`，所以新的依赖也会被自然收集，旧的依赖无人维护就会被遗忘——这就是为什么 if/else 切换分支后依赖能动态更新。
-
-最后一行的"不输出"演示了关键特性：**没读过的字段变化不会触发响应**——这是 MobX 性能基线高的根本原因。
+没读过的字段变化不会触发响应——比如 `autorun(() => console.log(state.count))` 修改 `state.name` 不会让它重跑。这是 MobX 性能基线高的根本原因。
 
 真实 MobX 还会处理：computed 缓存、reaction 调度、批处理事务、循环依赖检测、清理无效依赖等，但骨架就是这么简单。
 
 ### 简单实现一个 mini-Zustand？
 
-```js
-import { useSyncExternalStore } from 'react'
-
-function createStore(createState) {
-  let state
-  const listeners = new Set()
-
-  const setState = (partial, replace) => {
-    const next = typeof partial === 'function' ? partial(state) : partial
-    if (!Object.is(next, state)) {
-      const prev = state
-      state = replace ? next : { ...state, ...next }
-      listeners.forEach(l => l(state, prev))
-    }
-  }
-  const getState = () => state
-  const subscribe = (l) => {
-    listeners.add(l)
-    return () => listeners.delete(l)
-  }
-
-  state = createState(setState, getState)
-  return { setState, getState, subscribe }
-}
-
-function create(createState) {
-  const store = createStore(createState)
-  function useStore(selector = s => s) {
-    return useSyncExternalStore(
-      store.subscribe,
-      () => selector(store.getState()),
-    )
-  }
-  return Object.assign(useStore, store)
-}
-
-// 使用
-const useCounter = create((set) => ({
-  count: 0,
-  inc: () => set(s => ({ count: s.count + 1 })),
-}))
-```
-
 可以从两层来理解：
 
-1. **`createStore` 是纯 JS 的 store**：state 是普通变量，listeners 是 `Set`，setState 触发所有 listener。和 mini-Redux 几乎同构，只是没有 reducer/action 概念——直接用闭包里的方法 + `set` 修改状态。这一层完全不依赖 React，可以直接 `import` 在 Node 里用。
-2. **`create` 是 React 适配层**：用 `useSyncExternalStore` 把外部 store 接进 React。这个 hook 是 React 18 专门为外部 store 设计的，三个参数分别是订阅函数、获取当前快照的函数、SSR 快照函数。React 内部会管理订阅、缓存快照、处理并发模式下的一致性，库作者只需要"把订阅和取值告诉它"。
-3. **`Object.assign(useStore, store)`**：把 hook 和 store API 合并成一个对象，调用方既能 `useCounter(...)` 当 hook 用，又能 `useCounter.getState()` 在 React 之外用，API 表面积极小但能力齐全。
+**第一层：`createStore` —— 纯 JS 的 store**
 
-短短 30 行就实现了 Zustand 90% 的核心能力。这也解释了为什么 Zustand 包大小只有 1KB 左右——它真的只做了"够用就好"的事。
+state 是闭包里的普通变量，listeners 用 `Set` 保存（取消订阅 O(1) 删除）。对外暴露：
+
+1. **`setState(partial, replace)`**：支持对象或函数式写法，默认浅合并到旧 state，`replace: true` 时直接整个替换。变化前后用 `Object.is` 比较，避免相同引用重复通知。
+2. **`getState`**：返回当前 state。
+3. **`subscribe`**：把 listener 加入 Set，返回取消订阅函数。
+
+这一层完全不依赖 React，可以直接 `import` 在 Node 里用。和 mini-Redux 几乎同构，只是没有 reducer/action 概念——直接用闭包里的方法 + `set` 修改状态。
+
+**第二层：`create` —— React 适配层**
+
+用 `useSyncExternalStore` 把外部 store 接进 React。这个 hook 是 React 18 专门为外部 store 设计的，参数是订阅函数和获取当前快照的函数。React 内部会管理订阅、缓存快照、处理并发模式下的一致性，库作者只需要"把订阅和取值告诉它"。
+
+最后再把 hook 和 store API 合并成一个对象，调用方既能当 hook 用（`useCounter(s => s.count)`），又能在 React 之外用（`useCounter.getState()`），API 表面积极小但能力齐全。
+
+短短几十行就实现了 Zustand 90% 的核心能力。这也解释了为什么 Zustand 包大小只有 1KB 左右——它真的只做了"够用就好"的事。
 
 ### 说说你对 React Router 的理解？常用的 Router 组件有哪些？
 
@@ -1977,14 +1873,145 @@ React Router 是 React 生态中的路由方案，用来管理前端页面切换
 
 React 的 diff 目标是高效比较新旧虚拟节点，找出最小更新范围。
 
-常见原则：
+**核心三原则：**
 
-1. 不同类型节点直接替换。
-2. 同类型节点比较属性差异。
-3. 列表节点借助 `key` 判断是否可复用。
-4. 同层比较，不做跨层复杂比对。
+1. **同层比较**：只对比同一层级的节点，不跨层级移动。如果一个节点跨层移动了，React 会当作"原位置删除 + 新位置创建"，不会试图复用——这是把理论 O(n³) 降到 O(n) 的关键牺牲。
+2. **类型不同直接替换**：节点的 `type` 不同（如 `<div>` 变 `<span>`、组件 A 变组件 B），直接销毁旧节点连同它的整棵子树，重新创建新树——不会尝试复用。
+3. **`key` 标识列表项身份**：同层的列表渲染，靠 `key` 判断"这是同一个节点"。`key` 一致就复用 DOM、保留组件状态；不一致就视为不同节点。
+
+**diff 的三个层次：**
+
+1. **Tree Diff（树级）**：从根节点开始，按层逐级比较。同层 diff 完才进入下一层。
+2. **Component Diff（组件级）**：同类型组件继续 diff 子节点；不同类型直接整树替换。`shouldComponentUpdate` / `React.memo` 在这一层生效——返回 false 就跳过整棵子树的 diff。
+3. **Element Diff（元素级）**：同层多个子节点对比，处理插入、删除、移动。这是 `key` 真正发挥作用的地方。
+
+**Element Diff 的具体过程（重点）：**
+
+新旧子节点对比时，React 会：
+
+1. 第一轮：从左到右遍历，对位置相同的节点，按 `key` 判断是否同节点。是 → 复用 + 更新 props；否 → 跳出循环进入第二轮。
+2. 第二轮：把剩余的旧节点放进一个 `Map<key, fiber>`，然后继续遍历新节点。能在 Map 里找到 key → 复用并打"移动"标记；找不到 → 创建新节点。
+3. 收尾：Map 中没被复用的旧节点全部打"删除"标记。
 
 这套策略牺牲了理论上的最优解，换来了工程上更高的性能和更低的复杂度。
+
+### 主流框架的 diff 算法对比？
+
+虚拟 DOM diff 不是 React 独有——Vue、Preact、Inferno、Svelte（编译时）都有自己的实现。它们的核心都是"在 O(n) 内做完比较"，但在策略和性能上有明显差别。
+
+**1. 算法对比总表**
+
+| 维度 | React 16+ | Vue 2 | Vue 3 | Preact | Snabbdom | Svelte |
+| --- | --- | --- | --- | --- | --- | --- |
+| 数据结构 | Fiber 链表 | VNode 树 | VNode 树 + Block | VNode 树 | VNode 树 | 编译时无 VNode |
+| 同层 diff 策略 | 双轮遍历 + Map | 双端比较 | 最长递增子序列（LIS） | 双端比较 | 双端比较 | 直接生成 DOM 操作 |
+| key 必需性 | 列表强烈推荐 | 列表强烈推荐 | 列表强烈推荐 | 列表强烈推荐 | 列表强烈推荐 | 不需要（编译时已知） |
+| 静态优化 | React Compiler（19+） | 无 | PatchFlag + Block Tree | 无 | 无 | 完全静态分析 |
+| 时间复杂度 | O(n) | O(n) | O(n) | O(n) | O(n) | O(1) per update |
+| 可中断 | ✅ Fiber | ❌ | ❌ | ❌ | ❌ | N/A |
+
+**2. React 的双轮遍历**
+
+React 16+ 用"两轮遍历 + Map 查找"处理列表 diff：
+
+1. 第一轮按位置顺序对，遇到 key 不匹配就停。
+2. 第二轮把剩余旧节点放进 Map，新节点用 key 查 Map。
+
+优点：实现简单、行为可预测。缺点：列表头部插入新元素时，第一轮直接失败、全部走 Map——比双端比较慢一点。但配合 Fiber 的可中断渲染，实际体验影响很小。
+
+**3. Vue 2 的双端比较（Snabbdom 启发）**
+
+Vue 2 借鉴自 Snabbdom，使用四个指针：`oldStart`、`oldEnd`、`newStart`、`newEnd`。每轮做四次比较：
+
+1. `oldStart vs newStart`：头头匹配 → 都向后移。
+2. `oldEnd vs newEnd`：尾尾匹配 → 都向前移。
+3. `oldStart vs newEnd`：旧头匹配新尾 → 旧节点移到末尾。
+4. `oldEnd vs newStart`：旧尾匹配新头 → 旧节点移到开头。
+
+四种都不命中才退化到 key Map。优点：**"头部插入"、"尾部追加"、"反转列表"这些常见操作只需 O(n) 比较，不用建 Map**。
+
+**4. Vue 3 的最长递增子序列（LIS）**
+
+Vue 3 进一步优化：
+
+1. **PatchFlag**：编译期给每个 vnode 打标记（如 `TEXT`、`CLASS`、`PROPS`），运行时只 patch 标记的部分，跳过其他属性。
+2. **Block Tree**：把"动态节点"扁平化收集到一个数组，diff 时只遍历这个数组，跳过所有静态节点——一个含 100 节点但只有 3 个动态点的模板，diff 只看 3 个节点。
+3. **LIS 算法**：列表移动时找出"不需要移动"的最长递增子序列，让需要移动的节点最少。React 是"非必要不动"，Vue 3 用 LIS 做到"动得最少"。
+
+```
+旧顺序: [A, B, C, D, E]
+新顺序: [D, A, B, C, E]
+LIS 找出 [A, B, C, E] 不需要动，只移 D
+```
+
+**5. Snabbdom：双端比较的鼻祖**
+
+Snabbdom 是最早提出双端比较的虚拟 DOM 库，Vue 2、Cycle.js 都基于它的思路。它的特点：
+
+1. 模块化：不强制集成 props/style/event，按需引入。
+2. 极简：核心仅 200 多行。
+3. 钩子系统：`init`、`create`、`update`、`destroy` 等生命周期钩子。
+
+**6. Preact：React 兼容但更轻**
+
+Preact 实现了 React 的大部分 API，但 diff 用的是双端 + 单遍：
+
+1. 没有 Fiber，没有时间切片——同步递归 diff。
+2. 体积仅 3KB（gzip），适合 C 端、轻量 SDK 场景。
+3. 直接操作 DOM 节点的引用（不维护额外 Fiber 树），常数因子更小。
+
+**7. Inferno：极致性能优化**
+
+Inferno 也是 React-like，但 diff 做了几个激进优化：
+
+1. **Bailout 标记**：编译期给每个组件打"是否含动态内容"标记，纯静态组件直接跳过。
+2. **Specialized vnode**：根据节点类型（element / text / fragment / portal）分发到不同的 diff 函数，减少分支判断。
+3. 在多个 benchmark 上比 React、Preact 快 2-3 倍。但生态小、维护慢，未广泛采用。
+
+**8. Svelte：从根上消灭 diff**
+
+Svelte 是另一种思路——**编译时生成精确的 DOM 操作代码，运行时不需要 diff**：
+
+1. 编译器分析模板，知道哪些节点依赖哪些变量。
+2. 生成的代码直接是"`count` 变了 → 改 `<span>` 的 textContent"。
+3. 运行时没有虚拟 DOM、没有 diff、没有 reconciliation——更新成本是 O(变化的字段数)，而不是 O(节点数)。
+
+代价：动态性受限（条件渲染、列表必须用 `{#if}`、`{#each}` 这种受控语法），运行时不能"动态拼组件树"。
+
+**9. SolidJS：细粒度响应式 + 编译**
+
+SolidJS 走得更远：JSX 编译后**完全跳过组件层**，每个表达式直接订阅它依赖的信号（Signal）。
+
+1. 组件函数只跑一次（mount），后续状态变化只触发**最细粒度**的 DOM 更新。
+2. 没有 vdom，没有 reconciliation，没有 React/Vue 那种"组件 re-run"的概念。
+3. benchmark 性能接近原生 DOM 操作。
+
+**10. 各算法的实际性能对比（仅供参考）**
+
+按 [js-framework-benchmark](https://krausest.github.io/js-framework-benchmark/) 中"创建 1000 行 + 部分更新 + 完全替换"的综合分数：
+
+| 框架 | 相对 vanilla 慢多少倍（综合） |
+| --- | --- |
+| Vanilla JS | 1.00 |
+| SolidJS | 1.10 |
+| Svelte | 1.20 |
+| Inferno | 1.35 |
+| Preact | 1.55 |
+| Vue 3 | 1.50 |
+| React 19 | 1.95 |
+| Vue 2 | 2.00 |
+
+数据会随版本变化，但**相对位次基本稳定**：编译时方案（Svelte / Solid）> 优化过的运行时（Vue 3 / Inferno）> 通用框架（React / Vue 2）。
+
+**11. 一句话总结各算法的取舍**
+
+1. **React 的 diff**：算法保守、配合 Fiber 可中断，性能换工程化、调度能力、跨平台。
+2. **Vue 2 双端比较**：在常见列表操作上比 React 快，但同步、不可中断。
+3. **Vue 3 LIS + Block**：把"哪些节点真的会变"压到编译期，运行时 diff 量级骤降。
+4. **Svelte / Solid**：根本不做 diff，编译期生成精确更新代码——上限最高，但动态性受限。
+5. **Preact / Inferno**：极致轻量化或极致性能，是 React 在特定场景的替代。
+
+**对 React 团队的影响**：React 19 的 React Compiler 正是在向 Vue 3 / Solid 学习——把"哪些值真的会变"放到编译期分析，运行时少做无用功。可以预见未来 React 也会向"编译期优化 + 运行时调度"的方向继续演进。
 
 ### 说说对 Fiber 架构的理解？解决了什么问题？
 
@@ -2242,16 +2269,231 @@ React SSR 指在服务端先把组件渲染成 HTML，再返回给浏览器。
 
 ### 说说你在使用 React 过程中遇到的常见问题？如何解决？
 
-这类题考的是实战经验，回答时不要泛泛而谈，可以从几个高频问题说：
+这类题考的是实战经验，回答时不要泛泛而谈。下面用"问题现象 + 原因 + 解决办法"的结构，给出几个高频真实场景。
 
-1. 状态提升过度导致重复渲染。
-2. 列表 `key` 使用不当导致状态错乱。
-3. Hooks 依赖数组写错导致闭包问题。
-4. 异步请求竞态导致页面显示旧数据。
-5. 组件卸载后仍更新状态导致告警。
-6. Context 滥用导致大范围重渲染。
+#### 场景一：搜索框输入卡顿
 
-面试时最好用“问题现象 + 原因 + 解决办法”的结构回答，会更像真实项目经验。
+**问题现象**：搜索框输入"react"五个字符，输入框反应明显滞后，每次输入感觉延迟 100~200ms。商品列表有 2000 多项，每次输入都要重渲整个列表。
+
+**原因**：
+
+1. 输入框的 `value` 由 `useState` 控制，setState 触发整棵子树 render。
+2. 列表组件没做 memo，每次父组件 render 都跟着重新计算 + diff 2000 个 item。
+3. 列表 item 内部还有时间格式化、价格计算等同步开销。
+
+**解决办法**：
+
+1. **拆分组件 + memo**：把列表抽成独立组件用 `React.memo` 包裹，把昂贵计算用 `useMemo` 缓存。
+2. **`useDeferredValue` 降优先级**：搜索关键词存两份——一份立即更新（绑定输入框）、一份用 `useDeferredValue` 延迟（传给列表）。React 18 后用户输入会优先响应，列表渲染会被打断重排。
+3. **虚拟列表**：超过 1000 项的场景上 `react-window` / `react-virtuoso`，只渲染可视区域的 20~30 项。
+4. **服务端搜索 + 防抖**：本地过滤如果数据量再大，改成防抖 300ms 后请求接口。
+
+```jsx
+function Search() {
+  const [query, setQuery] = useState('')
+  const deferredQuery = useDeferredValue(query)
+  return (
+    <>
+      <input value={query} onChange={e => setQuery(e.target.value)} />
+      <List query={deferredQuery} />  {/* 用延迟值，渲染可被打断 */}
+    </>
+  )
+}
+```
+
+#### 场景二：列表删除后，中间项的 input 内容错位
+
+**问题现象**：列表渲染了 5 个用户卡片，每个卡片有个备注输入框。用户在第 3 个卡片输入"VIP"，然后点击第 1 个卡片的删除按钮，结果"VIP"出现在了第 2 个卡片（原来的第 3 个）。
+
+**原因**：列表用了数组下标作为 key：`<Card key={index} />`。删除第 1 项后，原来下标 1 的节点变成下标 0，原来下标 2 变成下标 1……React diff 看到 key 都没变（0/1/2/3），就把"换了内容的节点"当作"没变的节点"复用，DOM 被复用但内容、组件 state（包括 input 的 value）全部对应错位置。
+
+**解决办法**：
+
+1. **用业务唯一 id 作 key**：`<Card key={user.id} />`。React diff 能识别"id=3 的节点从位置 2 移到了位置 1"——DOM 整体移动，内部 state 跟着走，不会错位。
+2. **永远不用下标作 key**，除非满足三个条件之一：列表纯展示永不变动、item 无 state、item 无受控输入。
+3. **如果数据真的没有 id**：用 `crypto.randomUUID()` 在添加时生成稳定 id，而不是渲染时算下标。
+
+#### 场景三：`useEffect` 里 setInterval 计数器永远停在 1
+
+**问题现象**：写了一个秒数自增的计数器，UI 显示 0 → 1 之后就不动了。
+
+**原因**：经典的"闭包陷阱（Stale Closure）"。
+
+```jsx
+useEffect(() => {
+  const id = setInterval(() => {
+    setCount(count + 1)  // count 永远是 0
+  }, 1000)
+  return () => clearInterval(id)
+}, [])  // ❌ deps 写空数组,effect 只跑一次
+```
+
+`useEffect` deps 是空数组，effect 只在 mount 时执行一次，setInterval 回调闭包捕获的是初始 render 的 `count = 0`。每秒都是 `setCount(0 + 1)`，UI 一直显示 1。
+
+**解决办法**：
+
+1. **函数式更新**（最推荐）：`setCount(c => c + 1)`，c 来自 React 最新状态队列，跟闭包无关，deps 可以保持空数组。
+2. **正确写依赖**：`useEffect(..., [count])`，但每次 count 变化都会销毁重建定时器，浪费。
+3. **用 ref 保存最新值**：在长寿命订阅（WebSocket、全局事件）里用 ref 兜底，避免 effect 反复重启。
+4. **开 ESLint `react-hooks/exhaustive-deps`**：这条规则会自动警告漏写的依赖，是闭包陷阱的第一道防线。
+
+#### 场景四：快速切换 Tab，旧请求覆盖新请求
+
+**问题现象**：Tab1 加载耗时 2 秒，Tab2 加载耗时 100ms。用户点 Tab1 → 立刻切到 Tab2，100ms 后 Tab2 数据先显示，但 2 秒后 Tab1 的数据"覆盖"了 Tab2 的内容，看到的是 Tab1 的数据。
+
+**原因**：**异步竞态（race condition）**。两次请求并发，先发出的反而后到达，后到达的 setState 覆盖了先到达的结果。
+
+**解决办法**：
+
+1. **取消标志位**：effect 返回 cleanup，旧请求返回时直接丢弃。
+
+```jsx
+useEffect(() => {
+  let cancelled = false
+  fetch(`/api/${tabId}`).then(data => {
+    if (!cancelled) setData(data)
+  })
+  return () => { cancelled = true }
+}, [tabId])
+```
+
+2. **`AbortController`**：更彻底——直接中断请求，不仅丢弃响应，连网络请求都终止。
+
+```jsx
+useEffect(() => {
+  const ctrl = new AbortController()
+  fetch(`/api/${tabId}`, { signal: ctrl.signal })
+    .then(data => setData(data))
+    .catch(err => { if (err.name !== 'AbortError') throw err })
+  return () => ctrl.abort()
+}, [tabId])
+```
+
+3. **用 React Query / SWR**：它们内置请求去重、缓存、自动取消，业务代码完全不用关心竞态。
+
+#### 场景五：组件卸载后还在 setState，控制台爆警告
+
+**问题现象**：从详情页点返回后，控制台出现 "Can't perform a React state update on an unmounted component" 警告。
+
+**原因**：组件已经从 DOM 卸载，但 setTimeout / fetch / WebSocket 回调还在执行，回调里调了 `setState`——React 检测到目标组件已卸载，发出警告（React 17 还会警告，18 后悄悄忽略，但内存泄漏依然存在）。
+
+**解决办法**：
+
+1. **cleanup 清理副作用**：每个有"未来回调"的 effect 都要返回 cleanup。
+
+```jsx
+useEffect(() => {
+  const id = setTimeout(() => setData('done'), 5000)
+  return () => clearTimeout(id)
+}, [])
+```
+
+2. **mounted 标志位**：用于 Promise 链等不能取消的场景。
+
+```jsx
+useEffect(() => {
+  let mounted = true
+  api.get().then(d => { if (mounted) setData(d) })
+  return () => { mounted = false }
+}, [])
+```
+
+3. **订阅型副作用必须 unsubscribe**：WebSocket、resize 监听、全局事件总线都要在 cleanup 里取消订阅，否则会泄漏。
+
+#### 场景六：Context 一变，几十个无关组件全部重渲
+
+**问题现象**：用户登录态用 Context 管理，登录后 setUser 触发了订阅 UserContext 的整个组件树重渲——包括只用了主题色、跟用户信息无关的 100 多个组件。
+
+**原因**：
+
+1. Context value 引用变化时，**所有消费该 Context 的组件无差别重渲**，即使它们只用了 value 中的一小部分。
+2. 用户信息 + 主题 + 路由信息塞在同一个 Context 里，任何一个字段变都会牵一发动全身。
+3. value 写成 `{ user, theme, ...}` 这种对象，每次 Provider render 都是新引用——浅比较失效，memo 子组件也救不了。
+
+**解决办法**：
+
+1. **拆分 Context**：按变化频率分成 `UserContext`、`ThemeContext`、`AuthContext` 等，只让真正需要某字段的组件订阅对应 Context。
+2. **用 Zustand / Jotai 替代高频写入的 Context**：它们内置 selector + 浅比较，组件只订阅切片。Context 留给"低频写入 + 多处读取"（主题、i18n、路由）。
+3. **value 用 useMemo 稳定引用**：`<Provider value={useMemo(() => ({ user, login }), [user])}>`。
+4. **服务端状态用 React Query**：Context 不要管接口数据，React Query 自带缓存 + 重渲控制。
+
+#### 场景七：`useState` 初始值用昂贵计算，导致每次 render 都跑一遍
+
+**问题现象**：页面打开时卡顿明显，Profiler 显示 `Page` 组件首次 render 耗时 800ms。
+
+**原因**：`useState(parseGiantJson(rawData))` 这种写法，每次 render 都会算 `parseGiantJson`，虽然 React 只采用第一次的结果作为初始值，但**计算本身每次都在跑**——这是常见误区。
+
+**解决办法**：
+
+1. **传函数当初始值**（lazy initial state）：
+
+```jsx
+// ❌ 每次 render 都执行
+const [state, setState] = useState(parseGiantJson(rawData))
+
+// ✅ 只在首次 render 执行
+const [state, setState] = useState(() => parseGiantJson(rawData))
+```
+
+2. **同理适用 `useReducer`**：第三个参数 `init` 是惰性初始化函数。
+3. **派生值用 `useMemo`**：如果是依赖 props/state 计算出来的，用 `useMemo` 缓存。
+
+#### 场景八：表单受控输入打字越来越卡
+
+**问题现象**：一个含 50 个字段的复杂表单，每输一个字符整个表单组件都重渲一次，字段多的时候输入明显延迟。
+
+**原因**：用 `useState` 把整个表单数据放在父组件，每次 onChange 都 `setState({...form, [name]: val})`，触发整个表单 + 所有字段组件重渲。50 个字段时性能塌方。
+
+**解决办法**：
+
+1. **`react-hook-form`**：非受控 + 订阅模式，只让"真正变化的字段"重渲，其他字段引用 ref 不重渲。50 字段表单输入流畅度和单字段一样。
+2. **字段隔离 + 局部 state**：如果不引库，把每个字段拆成独立组件，字段内部自己 `useState`，只在 submit 时收集。
+3. **debounce 校验**：实时校验改成 debounce 300ms 触发，避免每个字符都触发一遍校验逻辑。
+
+#### 场景九：点击按钮后 ref 的 DOM 还是旧的
+
+**问题现象**：点击按钮 setState 切换显示一个 input，然后立即让它聚焦——但 `ref.current.focus()` 没生效，要再点一次才行。
+
+**原因**：setState 不是同步的，调用后 DOM 还没更新，此时 `ref.current` 要么是 `null`（组件还没渲染），要么是旧节点。
+
+**解决办法**：
+
+1. **`useEffect` 在渲染后聚焦**：
+
+```jsx
+useEffect(() => {
+  if (visible) inputRef.current?.focus()
+}, [visible])
+```
+
+2. **`flushSync` 强制同步更新**：确实需要"setState 后立刻操作 DOM"时用，但要慎用——会破坏并发渲染优化。
+
+```jsx
+import { flushSync } from 'react-dom'
+flushSync(() => setVisible(true))
+inputRef.current.focus()
+```
+
+3. **`autoFocus` 属性**：简单场景直接用 `<input autoFocus />`。
+
+#### 场景十：开发环境 effect 跑两次，导致请求发了两次
+
+**问题现象**：本地开发时，组件 mount 一次，但 useEffect 里的 `console.log` 打了两次，接口也请求了两次；部署到生产环境后正常。
+
+**原因**：React 18 的 `<StrictMode>` 在开发环境会**故意 mount → unmount → mount 一次组件**，目的是暴露不健壮的 effect 清理逻辑。生产环境不会有这个行为。
+
+**解决办法**：
+
+1. **不要关 StrictMode**：这是 React 帮你提前发现 bug 的机制，关掉等于鸵鸟。
+2. **正确写 cleanup**：每个 effect 都要能被"重复执行"——副作用要可清理、可幂等。
+3. **请求用 React Query / SWR**：它们自带请求去重，即使 effect 跑两次也只发一个网络请求。
+4. **如果是 logger / 埋点**：用 ref 记录"是否已经上报过"，或者在路由守卫里上报而不是组件 mount 时。
+
+---
+
+**面试回答的结构建议**：
+
+不要把所有场景都列出来，选 2~3 个最典型 + 你真踩过的讲透，再点出几个其他常见类型表明知识广度。**单个问题展开讲细节（具体复现步骤、profiler 截图思路、最终解法对比）**，比泛泛列十个问题更显实战经验。
 
 ## 七、React 各版本演进与新特性
 
@@ -2421,6 +2663,156 @@ createRoot(document.getElementById('root')).render(<App />)
 ```
 
 注意 `createRoot` 来自 `react-dom/client`（不是 `react-dom`），返回一个 root 对象，后续可以多次调用 `root.render(...)` 更新，也可以 `root.unmount()` 卸载。这种"先创建 root 再 render"的模式，是为了让 React 内部能持有更多渲染元数据（优先级、并发模式、错误处理回调等）。
+
+### 并发渲染（Concurrent Rendering）怎么开启？开启后效果是什么？
+
+并发渲染是 React 18 最核心的能力，但它**不是默认全开的开关**——开启分两步：升级到并发模式的运行时，再用并发 API 显式标记哪些更新走低优先级。
+
+#### 一、开启方式
+
+**第一步：换 `createRoot` 入口**
+
+这是激活并发模式的前提。只要应用通过 `createRoot` 启动，整棵树就具备了**并发模式的运行时能力**：自动批处理、Transitions、Suspense 数据获取、`useDeferredValue`、`useSyncExternalStore` 都才能正常工作。
+
+```js
+// ❌ 17 风格,只能跑同步渲染
+ReactDOM.render(<App />, document.getElementById('root'))
+
+// ✅ 18 风格,启用并发模式运行时
+import { createRoot } from 'react-dom/client'
+createRoot(document.getElementById('root')).render(<App />)
+```
+
+**关键认知**：换了 `createRoot` 不等于"所有渲染都自动变并发"——大多数 `setState` 还是高优先级、同步处理。换 createRoot 只是**让并发能力可用**，是否真的让某次更新走并发，还要看代码里有没有用 `startTransition` 这类 API。
+
+**第二步：显式标记低优先级更新**
+
+通过下面这些 API 主动告诉 React"这部分更新可以被打断"：
+
+| API | 作用 | 典型场景 |
+| --- | --- | --- |
+| `startTransition(fn)` | fn 内的 setState 标记为 transition | 搜索结果列表、Tab 切换 |
+| `useTransition()` | 返回 `[isPending, startTransition]`，多了一个加载态 | 同上，需要展示 spinner |
+| `useDeferredValue(value)` | 延迟某个值的传递 | 输入框防抖、昂贵图表 |
+| `<Suspense fallback={...}>` | 渲染中遇到未就绪资源会挂起 | 数据获取、代码分割 |
+| `lazy(() => import())` | 配合 Suspense 实现组件级懒加载 | 路由分包 |
+
+不用这些 API 的场景，更新依然走默认的同步优先级——**并发渲染是机会主义**，只有显式标记的更新才享受可中断、可调度。
+
+**第三步：升级生态库**
+
+老版状态库（旧版 react-redux、Zustand 1.x、Recoil 旧版）在并发模式下可能出现"tearing"——同一次更新中不同组件读到不同版本的 state。需要：
+
+1. 升级到使用 `useSyncExternalStore` 的版本（react-redux ≥ 8、Zustand ≥ 4）。
+2. 路由库升级到 React Router v6.4+ / TanStack Router。
+3. 数据库 / 表单库（react-hook-form、Formik）也都需要 18 兼容版本。
+
+#### 二、开启后的效果
+
+并发模式不是"代码自动变快"，而是带来**五项以前做不到的能力**：
+
+**效果 1：紧急更新优先响应，不再被低优先级渲染卡住**
+
+经典的搜索框场景：
+
+```jsx
+function Search() {
+  const [query, setQuery] = useState('')
+  const [list, setList] = useState([])
+  const [, startTransition] = useTransition()
+
+  function onChange(e) {
+    setQuery(e.target.value)              // 高优先级:输入框立即刷新
+    startTransition(() => {
+      setList(filterHugeList(e.target.value))  // 低优先级:列表渲染可被打断
+    })
+  }
+  // ...
+}
+```
+
+效果对比：
+
+1. **未开并发**：输入"react"五个字符,每个字符都要等 2000 项列表重渲完才能响应下一次输入,输入框出现明显卡顿。
+2. **开了并发**：输入框始终流畅响应,列表渲染会被新输入打断、丢弃旧渲染、用最新关键词重排。
+
+底层原理:transition 走低优先级 lane,被高优更新打断后 React 直接丢弃 WIP fiber 树,用新值重新开始——这就是 Fiber 双缓冲架构的用武之地。
+
+**效果 2：渲染中途让出主线程,避免长任务**
+
+并发模式下,React 把渲染拆成 5ms 左右的小切片(time slicing),每个切片结束都会调用 `shouldYield()` 检查浏览器是否需要绘制、响应输入。如果是,就主动让出主线程,下一帧再继续。
+
+| 场景 | 同步渲染 | 并发渲染 |
+| --- | --- | --- |
+| 列表 1 万项渲染 | 主线程独占 200ms,期间无法响应输入 | 拆成 40 个切片,期间用户输入、动画都流畅 |
+| 重型表单初始化 | 主线程占用 150ms,FCP 滞后 | 滚动、点击等交互不阻塞 |
+
+**效果 3：自动批处理覆盖所有上下文**
+
+并发模式下,无论从哪里调用 setState 都会自动合并:
+
+```js
+// React 17:同步事件外的 setState 不批处理
+setTimeout(() => {
+  setCount(c => c + 1)   // 立即重渲一次
+  setFlag(f => !f)        // 又立即重渲一次
+}, 0)
+
+// React 18 createRoot:任何位置都自动批处理
+setTimeout(() => {
+  setCount(c => c + 1)
+  setFlag(f => !f)
+  // 只重渲一次 ✓
+}, 0)
+```
+
+这把以往 setTimeout、Promise.then、原生事件回调里的"性能小坑"统一收口,业务代码不用再手动 batch。
+
+**效果 4:Suspense 能配合数据获取**
+
+18 之前 Suspense 只能配合 `React.lazy` 做代码分割。开了并发模式后,Suspense 可以拦截组件内部抛出的 Promise,等数据就绪再恢复渲染:
+
+```jsx
+<Suspense fallback={<Spinner />}>
+  <UserProfile userId={id} />  {/* 内部用 use() 读 Promise,自动挂起 */}
+</Suspense>
+```
+
+配合 React 19 的 `use()` API,可以做到"在组件里直接读异步值,等待期间自动展示 fallback"——完全不用写 `if (loading) return <Spinner />` 这种样板。
+
+**效果 5:服务端流式 SSR + 选择性 hydration**
+
+18 的 `renderToPipeableStream` 配合 Suspense,可以让 SSR:
+
+1. **流式输出 HTML**:首屏关键内容先返回,慢的部分用 `<!--$-->` 占位,数据就绪再追加。
+2. **选择性 hydration**:某个 Suspense 边界数据没回来时,客户端可以先 hydrate 已经返回的部分,不用等整页 HTML 全部就绪。
+3. **优先 hydrate 用户正在交互的区域**:用户点了某个组件,React 会优先 hydrate 它,即使它在 DOM 中靠后。
+
+这是 Next.js App Router、Remix 这类框架的底层基础。
+
+#### 三、开启并发渲染需要警惕的副作用
+
+并发模式不是"无副作用升级",有三个坑要心里有数:
+
+1. **StrictMode 下 effect 跑两次**:18 的开发环境会模拟"mount → unmount → mount"以暴露副作用清理问题。生产环境正常。如果第三方库没适配,可能出现重复初始化(参考前面的"场景十")。
+2. **render 阶段必须无副作用**:并发模式下 render 可能被打断、丢弃后重做。在 render 里发请求、改全局变量、写 ref(不在 useEffect 里),会导致不可预测的行为。`UNSAFE_componentWillMount` 等老生命周期被废弃就是这个原因。
+3. **外部 store 必须用 useSyncExternalStore**:旧版 redux/zustand 在并发模式下可能出现 tearing——A 组件读到旧 state、B 组件读到新 state。React 18 的 `useSyncExternalStore` 通过快照机制解决,所以状态库必须升级。
+
+#### 四、什么时候用 `startTransition`?
+
+不是所有更新都该标记为 transition,简单判断:
+
+| 更新类型 | 优先级 | 例子 |
+| --- | --- | --- |
+| **必须立即响应** | 高(默认) | 输入框打字、按钮点击、checkbox 切换 |
+| **可以慢一点** | 低(transition) | 搜索结果、过滤后的列表、Tab 内容、路由切换的目标页 |
+| **完全可延迟** | 最低 | 性能埋点、非关键日志 |
+
+简单口诀:**用户视线焦点必须立即响应,焦点之外的内容用 transition**。
+
+#### 五、一句话总结
+
+并发渲染的开启本质是**两层激活**——`createRoot` 让运行时具备并发能力,`startTransition` / `useDeferredValue` / `Suspense` 让具体更新真正走低优先级。开启后带来五项收益:**紧急更新优先、长任务拆切片、自动批处理、Suspense 数据获取、流式 SSR**。代价是**render 必须无副作用 + 外部 store 必须用 useSyncExternalStore**——遵守这两条,并发模式才能稳定发挥威力。
 
 ### React 19 有哪些新特性？
 
