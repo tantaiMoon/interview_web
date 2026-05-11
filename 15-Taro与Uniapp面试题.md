@@ -287,7 +287,7 @@ LogicalExpression {
 
 ### Taro 中使用 Hooks 有哪些注意事项？
 
-Taro 的 Hooks 分为两类，需要从不同包中引入：
+Taro 中的 Hooks 分为两类：**React 框架自带的 Hooks**（如 `useState`、`useEffect`、`useCallback` 等）从 `react` 引入，**Taro 专有 Hooks**（如 `useRouter`、`useDidShow`、`useReachBottom` 等页面生命周期相关 Hook）从 `@tarojs/taro` 引入。二者不能混用引入来源，否则会报错或失效。
 
 ```javascript
 // React 框架自带的 Hooks - 从 react 引入
@@ -311,6 +311,8 @@ import {
 
 #### **踩坑点 1：页面级 Hook 不能在子组件中使用**
 
+`useReachBottom`、`usePullDownRefresh`、`usePageScroll` 等 Taro 专有 Hooks 本质上绑定的是小程序页面的生命周期，只在**页面根组件**中注册才会生效。如果放在子组件中，由于子组件并不对应小程序的 Page 实例，Hook 的回调永远不会被触发。
+
 ```javascript
 // ❌ 错误：子组件中使用 useReachBottom，不会触发
 function ChildComponent() {
@@ -331,6 +333,8 @@ function PageIndex() {
 
 #### **踩坑点 2：闭包陷阱 - 推荐函数式更新**
 
+与 React 中 `useEffect` 的闭包问题类似，Taro 的页面级 Hooks（如 `useReachBottom`）的回调函数也会捕获创建时的 state 值。如果直接引用 state 变量，拿到的永远是注册那一刻的旧值，导致更新不生效。解决办法是使用 `setState` 的**函数式更新**形式，让 React 自动传入最新 state。
+
 ```javascript
 // ❌ 错误：捕获旧 state，page 一直是 0
 const [page, setPage] = useState(0)
@@ -345,6 +349,8 @@ useReachBottom(() => {
 ```
 
 #### **踩坑点 3：DOM 操作必须在 useReady 中**
+
+在小程序中，页面的初次渲染完成由 `onReady` 生命周期标识。Taro 对应提供了 `useReady` Hook，在此时才能安全地通过 `createSelectorQuery` 获取节点信息或执行 DOM 相关操作。而在 `useEffect` 中执行时，小程序视图层可能还未完成渲染，查询结果会返回 `null`。
 
 ```javascript
 // ❌ 错误：useEffect 中无法获取小程序节点
@@ -366,6 +372,8 @@ useReady(() => {
 
 #### **踩坑点 4：useShareAppMessage 需要配置启用**
 
+从 Taro 3.0.3 起，出于性能考虑，分享功能默认关闭。必须在页面的配置文件（`*.config.ts`）中显式将 `enableShareAppMessage` 设为 `true`，`useShareAppMessage` 的回调才会被注册。同理 `useShareTimeline` 也需要 `enableShareTimeline: true`。遗漏配置会导致分享按钮不显示或分享行为不触发。
+
 ```javascript
 // 从 Taro 3.0.3 开始，必须在页面配置中显式启用
 // pages/index/index.config.js
@@ -383,11 +391,11 @@ useShareAppMessage(() => ({
 
 ### Taro 3 的 setData 优化机制是怎样的？
 
-Taro 3 是重运行时框架，每次更新都需要把数据通过 setData 从逻辑层传到视图层，因此 setData 的优化至关重要。
+Taro 3 是重运行时框架，每次更新都需要把数据通过 `setData` 从逻辑层（JS 线程）传到视图层（渲染线程），这是一个跨线程通信过程，传输的数据量直接影响性能，因此 setData 的优化至关重要。Taro 3 在框架层面内置了多种优化策略来减少 setData 的调用次数和数据体积。
 
 **1. Batch 批量更新机制**
 
-Taro 内部对 setData 做了 batch 捆绑更新，多次 setState 会合并为一次 setData 调用：
+小程序的 `setData` 是一次昂贵的跨线程调用。如果在同一次事件循环中多次调用 `setState`，Taro 会将这些更新收集并合并，最终只触发一次 `setData`，从而避免频繁的线程通信开销。这与 React 的批量更新思路一致。
 
 ```javascript
 // 这三次更新会被合并为一次 setData
@@ -400,11 +408,11 @@ this.setState({ c: 3 })
 
 **2. 自动 Diff 优化**
 
-在调用小程序的 setData 之前，Taro 会把当前数据和上一次的数据做 diff，只对变化的数据进行 setData，开发者无需手动优化。
+即使经过批量合并，如果每次都把整个页面数据全量传给视图层，数据量仍然很大。Taro 在调用小程序原生 `setData` 之前，会将当前虚拟 DOM 数据与上一次的数据做浅比较 diff，只提取发生变化的字段进行增量更新，开发者无需手动拆分 setData。例如页面中有 100 个字段但只改了 1 个，最终只会 `setData({ thatOneField: newValue })`。
 
 **3. baseLevel 配置（解决模板递归问题）**
 
-对于不支持模板递归的小程序（微信、QQ、京东），Taro 会循环 baseLevel 次以支持嵌套模板。当 DOM 结构超过 baseLevel 层后，会使用原生自定义组件进行渲染。
+微信等小程序的 WXML 模板不支持递归调用自身，因此 Taro 采用"循环展开"的方式：将模板重复写 N 层（`baseLevel` 次）来支持嵌套渲染。当 DOM 嵌套层级超过 `baseLevel` 后，Taro 会将超出的部分放在一个原生自定义组件中渲染，这个自定义组件内部又拥有新的 `baseLevel` 层模板空间。降低 `baseLevel` 可以减少模板体积（编译产物更小），但会增加自定义组件的数量。
 
 ```javascript
 // config/index.js
@@ -416,13 +424,13 @@ module.exports = {
 ```
 
 **baseLevel 调整的副作用：**
-- flex 布局跨原生自定义组件会失效（最大问题）
-- SelectorQuery.select 跨自定义组件需要使用 `>>>` 选择器：`.parent >>> .child`
-- 是全局配置，影响所有页面
+- flex 布局跨原生自定义组件会失效（最大问题）——因为自定义组件形成了新的渲染边界，flex 容器无法穿透组件边界影响子元素的布局
+- SelectorQuery.select 跨自定义组件需要使用 `>>>` 选择器：`.parent >>> .child`——小程序的节点查询同样受到组件边界限制
+- 是全局配置，影响所有页面——无法按页面粒度调整
 
 **4. CustomWrapper 局部更新优化（推荐）**
 
-针对 baseLevel 全局配置不灵活的问题，Taro 提供了 `CustomWrapper` 组件，作用是创建一个原生自定义组件，实现局部 setData 更新：
+`baseLevel` 是全局配置，调低后所有页面都会受影响，不够灵活。`CustomWrapper` 是 Taro 提供的更精细的优化方案：它会在小程序端创建一个原生自定义组件作为渲染边界，被其包裹的模块更新时只会触发该组件内部的 `setData`，不会把外层或兄弟节点的数据一起传入，从而实现局部更新、减少传输量。典型场景是页面中只有某个模块频繁更新（如倒计时、轮播图），其他部分相对静态。
 
 ```javascript
 import { View, Text, CustomWrapper } from '@tarojs/components'
@@ -446,11 +454,13 @@ function Page() {
 ```
 
 **注意事项：**
-- 不要过度使用 CustomWrapper，会带来额外开销
-- 一般包裹遇到性能问题的复杂模块即可
-- 注意自定义组件的两个限制（flex 布局跨界、选择器跨界）
+- 不要过度使用 CustomWrapper，每个 CustomWrapper 都会创建一个原生自定义组件实例，带来额外的内存和通信开销
+- 一般包裹遇到性能问题的复杂模块即可，按需使用
+- 注意自定义组件的两个限制（flex 布局跨界、选择器跨界），与 baseLevel 降低后的副作用一致
 
 **5. 写法陷阱：保持对象引用**
+
+Taro 的自动 Diff 依赖浅比较来判断数据是否变化。如果在 JSX 中直接内联写对象或数组字面量，每次渲染都会产生新的引用，导致 Diff 结果为"数据已变化"，从而触发不必要的 setData。解决办法是通过 `useState` 或 `useMemo` 保持引用稳定，让浅比较判断出"未变化"并跳过更新。
 
 ```javascript
 // ❌ 错误：每次渲染都生成新对象，引用变化触发 setData
@@ -466,6 +476,8 @@ function MapComponent() {
 ```
 
 **6. 避免传递非标准属性**
+
+Taro 会将组件的 props 通过 `setData` 传递到视图层。如果给小程序原生组件传了它不认识的自定义属性（如 `customProp`），这些属性依然会被序列化到 setData 的数据中，造成传输冗余。小程序约定使用 `data-*` 属性来传递自定义数据，这类属性有专门的处理通道，不会增加 setData 的数据负担。
 
 ```javascript
 // ❌ 错误：自定义属性会被一并 setData，造成数据冗余
